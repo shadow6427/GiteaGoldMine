@@ -108,12 +108,8 @@ func (q *WorkerPoolQueue[T]) doWorkerHandle(batch []T) {
 			return // do not requeue items when flushing, since all items failed, requeue them will continue failing.
 		}
 		log.Error("Queue %q failed to handle batch of %d items, backoff for a few seconds", q.GetName(), len(batch))
-		// TODO: ideally it shouldn't "sleep" here (blocks the worker, then blocks flush).
-		// It could debounce the requeue operation, and try to requeue the items in the future.
-		select {
-		case <-q.ctxRun.Done():
-		case <-time.After(time.Duration(unhandledItemRequeueDuration.Load())):
-		}
+		q.deferUnhandledRequeue(append([]T(nil), unhandled...), time.Duration(unhandledItemRequeueDuration.Load()))
+		return
 	}
 	for _, item := range unhandled {
 		if err := q.Push(item); err != nil {
@@ -122,6 +118,22 @@ func (q *WorkerPoolQueue[T]) doWorkerHandle(batch []T) {
 			}
 		}
 	}
+}
+
+func (q *WorkerPoolQueue[T]) deferUnhandledRequeue(unhandled []T, delay time.Duration) {
+	go func() {
+		select {
+		case <-q.ctxRun.Done():
+		case <-time.After(delay):
+		}
+		for _, item := range unhandled {
+			if err := q.Push(item); err != nil {
+				if !q.basePushForShutdown(item) {
+					log.Error("Failed to requeue item for queue %q when calling handler: %v", q.GetName(), err)
+				}
+			}
+		}
+	}()
 }
 
 // basePushForShutdown tries to requeue items into the base queue when the WorkerPoolQueue is shutting down.
