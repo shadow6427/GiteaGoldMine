@@ -29,6 +29,8 @@ type WorkerPoolQueue[T any] struct {
 	origHandler HandlerFuncT[T]
 	safeHandler HandlerFuncT[T]
 
+	deferredRequeueWG sync.WaitGroup
+
 	baseQueueType string
 	baseConfig    *BaseConfig
 	baseQueue     baseQueue
