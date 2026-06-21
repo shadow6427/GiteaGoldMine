@@ -93,6 +93,63 @@ func TestWorkerPoolQueueUnhandled(t *testing.T) {
 	})
 }
 
+func TestWorkerPoolQueueUnhandledBackoffDoesNotBlockWorker(t *testing.T) {
+	oldUnhandledItemRequeueDuration := unhandledItemRequeueDuration.Load()
+	unhandledItemRequeueDuration.Store(int64(time.Second))
+	defer unhandledItemRequeueDuration.Store(oldUnhandledItemRequeueDuration)
+
+	handled := make(chan int, 4)
+	handler := func(items ...int) (unhandled []int) {
+		for _, item := range items {
+			handled <- item
+			if item == 1 {
+				unhandled = append(unhandled, item)
+			}
+		}
+		return unhandled
+	}
+
+	q, _ := newWorkerPoolQueueForTest("test-workpoolqueue", setting.QueueSettings{Type: "channel", BatchLength: 1, MaxWorkers: 1, Length: 10}, handler, false)
+	stop := runWorkerPoolQueue(q)
+	defer stop()
+
+	assert.NoError(t, q.Push(1))
+	assert.NoError(t, q.Push(2))
+
+	assert.Equal(t, 1, <-handled)
+	select {
+	case got := <-handled:
+		assert.Equal(t, 2, got)
+	case <-time.After(200 * time.Millisecond):
+		t.Fatal("unhandled backoff blocked the only worker")
+	}
+}
+
+func TestWorkerPoolQueueUnhandledBackoffDoesNotBlockFlush(t *testing.T) {
+	oldUnhandledItemRequeueDuration := unhandledItemRequeueDuration.Load()
+	unhandledItemRequeueDuration.Store(int64(time.Second))
+	defer unhandledItemRequeueDuration.Store(oldUnhandledItemRequeueDuration)
+
+	handled := make(chan struct{}, 1)
+	handler := func(items ...int) (unhandled []int) {
+		handled <- struct{}{}
+		return items
+	}
+
+	q, _ := newWorkerPoolQueueForTest("test-workpoolqueue", setting.QueueSettings{Type: "channel", BatchLength: 1, MaxWorkers: 1, Length: 10}, handler, false)
+	stop := runWorkerPoolQueue(q)
+	defer stop()
+
+	assert.NoError(t, q.Push(1))
+	select {
+	case <-handled:
+	case <-time.After(200 * time.Millisecond):
+		t.Fatal("worker did not handle the queued item")
+	}
+
+	assert.NoError(t, q.FlushWithContext(t.Context(), 200*time.Millisecond))
+}
+
 func TestWorkerPoolQueuePersistence(t *testing.T) {
 	runCount := 2 // we can run these tests even hundreds times to see its stability
 	t.Run("1/1", func(t *testing.T) {
